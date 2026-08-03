@@ -33,7 +33,29 @@ import requests
 SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 
 
-def load_api_key() -> str:
+class ScribeHTTPError(RuntimeError):
+    """Raised when Scribe returns a non-200. Carries the HTTP status code so
+    callers can distinguish auth/payment/quota (401/402/429) from other errors."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def load_api_key(required: bool = False) -> str:
+    """Return the ElevenLabs API key, or "" when none is configured.
+
+    With required=True, exit instead of returning "" (the original behavior,
+    kept available for callers that genuinely cannot proceed without Scribe).
+    When the key is absent, transcribe_one falls back to local Whisper, so the
+    default is non-fatal."""
+    # 1) Canonical secrets store (workspace convention): one plain key per file.
+    secret_file = Path.home() / ".jarvis-secrets" / "elevenlabs-api-key.txt"
+    if secret_file.exists():
+        key = secret_file.read_text().strip().strip('"').strip("'")
+        if key:
+            return key
+    # 2) Repo-local .env (ELEVENLABS_API_KEY=...).
     for candidate in [Path(__file__).resolve().parent.parent / ".env", Path(".env")]:
         if candidate.exists():
             for line in candidate.read_text().splitlines():
@@ -43,10 +65,15 @@ def load_api_key() -> str:
                 k, v = line.split("=", 1)
                 if k.strip() == "ELEVENLABS_API_KEY":
                     return v.strip().strip('"').strip("'")
+    # 3) Environment variable.
     v = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not v:
-        sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
-    return v
+    if v:
+        return v
+    if required:
+        sys.exit(
+            "ELEVENLABS_API_KEY not found in ~/.jarvis-secrets/elevenlabs-api-key.txt, .env, or environment"
+        )
+    return ""
 
 
 def count_audio_tracks(video_path: Path) -> int:
@@ -108,7 +135,9 @@ def call_scribe(
         )
 
     if resp.status_code != 200:
-        raise RuntimeError(f"Scribe returned {resp.status_code}: {resp.text[:500]}")
+        raise ScribeHTTPError(
+            resp.status_code, f"Scribe returned {resp.status_code}: {resp.text[:500]}"
+        )
 
     return resp.json()
 
@@ -147,6 +176,18 @@ def transcribe_one(
             print(f"cached: {out_path.name}")
         return out_path
 
+    # --- Transcriber routing -------------------------------------------------
+    # Use local Whisper when forced (VIDEO_USE_TRANSCRIBER=whisper) or when no
+    # ElevenLabs key is configured. Whisper writes the same Scribe-compatible
+    # JSON to the same path, so downstream helpers are unaffected.
+    forced = os.environ.get("VIDEO_USE_TRANSCRIBER", "").strip().lower()
+    if forced == "whisper" or not api_key:
+        from transcribe_whisper import transcribe_one_whisper
+        if verbose and forced != "whisper":
+            print("  no ElevenLabs key available, using local Whisper", flush=True)
+        return transcribe_one_whisper(video, edit_dir, language=language, verbose=verbose,
+                                          audio_track=audio_track)
+
     if verbose:
         print(f"  extracting audio from {video.name}", flush=True)
 
@@ -156,26 +197,38 @@ def transcribe_one(
               f"{audio_track + 1} (--audio-track to change)", flush=True)
 
     t0 = time.time()
-    with tempfile.TemporaryDirectory() as tmp:
-        audio = Path(tmp) / f"{video.stem}.wav"
-        extract_audio(video, audio, audio_track)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / f"{video.stem}.wav"
+            extract_audio(video, audio, audio_track)
 
-        # Uploading silence costs the same as uploading speech and returns
-        # nothing, so catch the wrong-track case before paying for it.
-        peak = peak_dbfs(audio)
-        if peak < -60.0:
-            raise RuntimeError(
-                f"track {audio_track + 1} of {video.name} is silent "
-                f"(peak {peak:.1f} dBFS) - not uploading. "
-                + (f"The file has {n_tracks} audio tracks; try --audio-track "
-                   + " or ".join(str(i) for i in range(n_tracks) if i != audio_track) + "."
-                   if n_tracks > 1 else "Check the source audio.")
+            # Uploading silence costs the same as uploading speech and returns
+            # nothing, so catch the wrong-track case before paying for it.
+            peak = peak_dbfs(audio)
+            if peak < -60.0:
+                raise RuntimeError(
+                    f"track {audio_track + 1} of {video.name} is silent "
+                    f"(peak {peak:.1f} dBFS) - not uploading. "
+                    + (f"The file has {n_tracks} audio tracks; try --audio-track "
+                       + " or ".join(str(i) for i in range(n_tracks) if i != audio_track) + "."
+                       if n_tracks > 1 else "Check the source audio.")
+                )
+
+            size_mb = audio.stat().st_size / (1024 * 1024)
+            if verbose:
+                print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
+            payload = call_scribe(audio, api_key, language, num_speakers)
+    except ScribeHTTPError as e:
+        # Auth/payment/quota: fall back to local Whisper. Other HTTP errors raise.
+        if e.status_code in (401, 402, 429):
+            print(
+                f"⚠️ Scribe unavailable (HTTP {e.status_code}), falling back to local Whisper",
+                flush=True,
             )
-
-        size_mb = audio.stat().st_size / (1024 * 1024)
-        if verbose:
-            print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
-        payload = call_scribe(audio, api_key, language, num_speakers)
+            from transcribe_whisper import transcribe_one_whisper
+            return transcribe_one_whisper(video, edit_dir, language=language, verbose=verbose,
+                                          audio_track=audio_track)
+        raise
 
     out_path.write_text(json.dumps(payload, indent=2))
     dt = time.time() - t0
