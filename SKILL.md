@@ -1,6 +1,7 @@
 ---
 name: video-use
-description: Edit any video by conversation. Transcribe, cut, color grade, generate overlay animations, burn subtitles — for talking heads, montages, tutorials, travel, interviews. No presets, no menus. Ask questions, confirm the plan, execute, iterate, persist. Production-correctness rules are hard; everything else is artistic freedom.
+description: Edit any video by conversation. Transcribe, cut, color grade, generate overlay animations, burn subtitles — for talking heads, montages, tutorials, travel, interviews. No presets, no menus. Ask questions, confirm the plan, execute, iterate, persist. Production-correctness rules are hard; everything else is artistic freedom. Use when the user wants to edit, cut, color grade, caption, subtitle, or transcribe a video file.
+allowed-tools: Bash(python3 ${CLAUDE_SKILL_DIR}/helpers/*)
 ---
 
 # Video Use
@@ -105,206 +106,39 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 
 ## Cut craft (techniques)
 
-- **Audio-first.** Candidate cuts from word boundaries and silence gaps.
-- **Preserve peaks.** Laughs, punchlines, emphasis beats. Extend past punchlines to include reactions — the laugh IS the beat.
-- **Speaker handoffs** benefit from air between utterances. Common values: 400–600ms. Less for fast-paced, more for cinematic. Taste call.
-- **Audio events as signals.** `(laughs)`, `(sighs)`, `(applause)` mark beats. Extend past them.
-- **Silence gaps are cut candidates.** Silences ≥400ms are usually the cleanest. 150–400ms phrase boundaries are usable with a visual check. <150ms is unsafe (mid-phrase).
-- **Example cut padding** (the launch video shipped with this): 50ms before the first kept word, 80ms after the last. Tighter for montage energy, looser for documentary. Stay in the 30–200ms working window (Hard Rule 7).
-- **Never reason audio and video independently.** Every cut must work on both tracks.
+See references/cut-craft.md for audio-first cutting techniques and taste calls.
 
 ## The packed transcript (primary reading view)
 
-`pack_transcripts.py` reads all `transcripts/*.json` and produces one markdown file where each take is a list of phrase-level lines, each prefixed with its `[start-end]` time range. Phrases break on any silence ≥ 0.5s OR speaker change. This is the artifact the editor sub-agent reads to pick cuts — it gives word-boundary precision from text alone at 1/10 the tokens of raw JSON.
-
-Example line:
-```
-## C0103  (duration: 43.0s, 8 phrases)
-  [002.52-005.36] S0 Ninety percent of what a web agent does is completely wasted.
-  [006.08-006.74] S0 We fixed this.
-```
+See references/packed-transcript.md for the `takes_packed.md` format and an example.
 
 ## Editor sub-agent brief (for multi-take selection)
 
-When the task is "pick the best take of each beat across many clips," spawn a dedicated sub-agent with a brief shaped like this. The structure is load-bearing; the pitch-shape example is not.
-
-```
-You are editing a <type> video. Pick the best take of each beat and 
-assemble them chronologically by beat, not by source clip order.
-
-INPUTS:
-  - takes_packed.md (time-annotated phrase-level transcripts of all takes)
-  - Product/narrative context: <2 sentences from the user>
-  - Speaker(s): <name, role, delivery style note>
-  - Expected structure: <pick an archetype or invent one>
-  - Verbal slips to avoid: <list from the pre-scan pass>
-  - Target runtime: <seconds>
-
-Common structural archetypes (pick, adapt, or invent):
-  - Tech launch / demo:   HOOK → PROBLEM → SOLUTION → BENEFIT → EXAMPLE → CTA
-  - Tutorial:             INTRO → SETUP → STEPS → GOTCHAS → RECAP
-  - Interview:            (QUESTION → ANSWER → FOLLOWUP) repeat
-  - Travel / event:       ARRIVAL → HIGHLIGHTS → QUIET MOMENTS → DEPARTURE
-  - Documentary:          THESIS → EVIDENCE → COUNTERPOINT → CONCLUSION
-  - Music / performance:  INTRO → VERSE → CHORUS → BRIDGE → OUTRO
-  - Or invent your own.
-
-RULES:
-  - Start/end times must fall on word boundaries from the transcript.
-  - Pad cut boundaries (working window 30–200ms).
-  - Prefer silences ≥ 400ms as cut targets.
-  - Unavoidable slips are kept if no better take exists. Note them in "reason".
-  - If over budget, revise: drop a beat or trim tails. Report total and self-correct.
-
-OUTPUT (JSON array, no prose):
-  [{"source": "C0103", "start": 2.42, "end": 6.85, "beat": "HOOK",
-    "quote": "...", "reason": "..."}, ...]
-
-Return the final EDL and a one-line total runtime check.
-```
+See references/editor-subagent-brief.md for the full multi-take selection sub-agent brief.
 
 ## Color grade (when requested)
 
-Your job is to **reason about the image**, not apply a preset. Look at a frame (via `timeline_view`), decide what's wrong, adjust one thing, look again.
-
-Mental model is ASC CDL. Per channel: `out = (in * slope + offset) ** power`, then global saturation. `slope` → highlights, `offset` → shadows, `power` → midtones.
-
-**Example filter chains** (`grade.py` has `--list-presets`; use them as starting points or mix your own):
-
-- **`warm_cinematic`** — retro/technical, subtle teal/orange split, desaturated. Shipped in a real launch video. Safe for talking heads.
-- **`neutral_punch`** — minimal corrective: contrast bump + gentle S-curve. No hue shifts.
-- **`none`** — straight copy. Default when the user hasn't asked.
-
-For anything else — portraiture, nature, product, music video, documentary — invent your own chain. `grade.py --filter '<raw ffmpeg>'` accepts any filter string.
-
-Hard rules: apply **per-segment during extraction** (not post-concat, which re-encodes twice). Never go aggressive without testing skin tones.
+See references/color-grade.md for the ASC CDL mental model, example filter chains, and hard rules.
 
 ## Subtitles (when requested)
 
-Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sentence per line), **case** (UPPER/Title/Natural), and **placement** (margin from bottom). The right combo depends on content.
-
-**Worked styles** — pick, adapt, or invent:
-
-**`bold-overlay`** — short-form tech launch, fast-paced social. ~2-word chunks, UPPERCASE, break on punctuation and pauses ≥ 0.3s, grow to 3 words rather than flash a cue < 0.35s (`chunk_words` in `render.py`), Helvetica 18 Bold, white-on-outline, `MarginV=35`. `render.py` ships with this as `SUB_FORCE_STYLE`.
-
-```
-FontName=Helvetica,FontSize=18,Bold=1,
-PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,
-BorderStyle=1,Outline=2,Shadow=0,
-Alignment=2,MarginV=35
-```
-
-**`natural-sentence`** (if you invent this mode) — narrative, documentary, education. 4–7 word chunks, sentence case, break on natural pauses, `MarginV=60–80`, larger font for readability, slightly wider max-width. No shipped force_style — design one if you need it.
-
-Invent a third style if neither fits. Hard rules: subtitles LAST (Rule 1), output-timeline offsets (Rule 5).
+See references/subtitles.md for chunking/case/placement dimensions and worked subtitle styles.
 
 ## Animations (when requested)
 
-Animations match the content and the brand. **Get the palette, font, and visual language from the conversation** — never assume a default. If the user hasn't told you, propose a palette in the strategy phase and wait for confirmation before building anything.
-
-**Tool options:**
-
-Pick the engine per animation slot. Do not default to Remotion just because the animation is web-adjacent.
-
-- **HyperFrames** — Browser-native HTML/CSS/GSAP video compositions: product UI motion, website-to-video or mockup-to-video captures, kinetic typography, landing-page/storyboard promos, data-driven UI states, transparent WebM overlays, and clips that need deterministic frame capture plus HyperFrames lint/validate/render checks. Best when the animation should be authored and verified like a web composition instead of a React component tree.
-- **Remotion** — React/CSS compositions with component state, reusable React primitives, or an existing Remotion brand system. Best when the user specifically asks for React/Remotion or when React composition is the simpler authoring model.
-- **Manim** — formal diagrams, state machines, equation derivations, graph morphs. Read `skills/manim-video/SKILL.md` and its references for depth.
-- **PIL + PNG sequence + ffmpeg** — simple overlay cards: counters, typewriter text, single bar reveals, progressive draws. Fast to iterate, any aesthetic you want. The launch video used this.
-
-For HyperFrames slots, scaffold the slot inside `edit/animations/slot_<id>/` with `npx --yes hyperframes init . --example blank --non-interactive --skip-skills`, build the HTML composition there, run the HyperFrames checks that fit the slot (`lint`, `validate`, and a draft render when practical), then produce the final overlay video with `npx --yes hyperframes render . -o render.mp4` or `--format webm -o render.webm` when alpha is required. Point the EDL overlay `file` at the actual rendered path.
-
-For Remotion slots, keep the Remotion project isolated inside the same slot directory, scaffold with `npx create-video@latest` or install Remotion locally there, render the composition to `render.mp4` with the project-local `remotion render` command, and verify duration and dimensions with `ffprobe`.
-
-None is mandatory. Invent hybrids if useful (e.g., PIL background with a HyperFrames or Remotion layer on top).
-
-**Duration rules of thumb, context-dependent:**
-
-- **Sync-to-narration explanations.** A viewer needs to parse the content at 1×. Rough floor 3s, typical 5–7s for simple cards, 8–14s for complex diagrams. The launch video shipped at 5–7s per simple card.
-- **Beat-synced accents** (music video, fast montage). 0.5–2s is fine — they're visual accents, not information. The "readable at 1×" rule becomes *"recognizable at 1×"*, not *"fully parseable."*
-- **Hold the final frame ≥ 1s** before the cut (universal).
-- **Over voiceover:** total duration ≥ `narration_length + 1s` (universal).
-- **Never parallel-reveal independent elements** — the eye can't track two new things at once. One thing, pause, next thing.
-
-**Animation payoff timing (rule for sync-to-narration):** get the payoff word's timestamp. Start the overlay `reveal_duration` seconds earlier so the landing frame coincides with the spoken payoff word. Without this sync the animation feels disconnected.
-
-**Easing** (universal — never `linear`, it looks robotic):
-
-```python
-def ease_out_cubic(t):    return 1 - (1 - t) ** 3
-def ease_in_out_cubic(t):
-    if t < 0.5: return 4 * t ** 3
-    return 1 - (-2 * t + 2) ** 3 / 2
-```
-
-`ease_out_cubic` for single reveals (slow landing). `ease_in_out_cubic` for continuous draws.
-
-**Typing text anchor trick:** center on the FULL string's width, not the partial-string width — otherwise text slides left during reveal.
-
-**Example palette** (the launch video — one aesthetic among infinite):
-- Background `(10, 10, 10)` near-black
-- Accent `#FF5A00` / `(255, 90, 0)` orange
-- Labels `(110, 110, 110)` dim gray
-- Font: Menlo Bold at `/System/Library/Fonts/Menlo.ttc` (index 1)
-- ≤ 2 accent colors, ~40% empty space, minimal chrome
-- Result: terminal / retro tech feel
-
-This is one style. If the brand is warm and serif, use that. If it's colorful and playful, use that. If the user handed you a style guide, follow it. If they didn't, propose one and confirm.
-
-**Fonts fail silently.** A web font that didn't load renders in a fallback face with no error — the video ships in "almost Arial". In HyperFrames/Remotion, await the font load and then assert it: `if (!document.fonts.check('700 76px "Inter"')) throw new Error(...)`. In PIL, pass an explicit font path; never rely on the default.
-
-**Worked example — "show the edit" hook** (a launch video for this tool). Instead of a title card, the first 3s visualize the editing itself: each transcript word pops in on its Scribe timestamp, with bars under it drawn from the real audio envelope; a filler ("ummm") grows letter by letter while it is spoken, turns orange and is cut out on screen at the same frame the audio cuts, and the next line lands immediately. It works because the picture is *driven by the same data as the sound* — one composition (Remotion) reads frame-exact word/envelope JSON produced in Python, so nothing can drift. Use the idea whenever the story is "we removed something": make the removal visible.
-
-**Parallel sub-agent brief** — each animation is one sub-agent spawned via the `Agent` tool. Each prompt is self-contained (sub-agents have no parent context). Include:
-
-1. One-sentence goal: *"Build ONE animation: [spec]. Nothing else."*
-2. Absolute output path (`<edit>/animations/slot_<id>/render.mp4`)
-3. Exact technical spec: resolution, fps, codec, pix_fmt, CRF, duration
-4. Style palette as concrete values (RGB tuples, hex, or reference to a design system)
-5. Font path with index
-6. Frame-by-frame timeline (what happens when, with easing)
-7. Anti-list ("no chrome, no extras, no titles unless specified")
-8. Code pattern reference (copy helpers inline, don't import across slots)
-9. Deliverable checklist (script, render, verify duration via ffprobe, report)
-10. **"Do not ask questions. If anything is ambiguous, pick the most obvious interpretation and proceed."**
-
-One sub-agent = one file (unique filenames, parallel agents don't overwrite each other).
+See references/animations.md for tool options (HyperFrames, Remotion, Manim, PIL), duration rules, easing, and the parallel sub-agent brief.
 
 ## Music and sound effects (when requested)
 
-Sound is where generated videos sound cheap. Worked rules from launch edits:
-
-- **Fewer effects.** Every effect is tied to something visible (a cut, a landing, a click). ~20 stock whooshes/risers/impacts in 18s reads as generic; ~8 reads as designed.
-- **Hit on the frame.** Most effects have an attack (silence or a build before the transient). Measure it (first sample above ~-30 dBFS of the peak) and start the file `attack` seconds *before* the visible contact frame.
-- **Duck music under speech** (roughly -12 to -15 dB relative to its music-only level), and ramp it out before a stinger or end card instead of letting its own tail decay under your CTA.
-- **Master once:** mix to PCM, then two-pass loudnorm (-14 LUFS, true peak ≤ -1 dBTP) on the final mix. Then measure per section (see Self-eval).
-- **Music taste is the user's call.** Generated music defaults to "hype"; offer two contrasting beds and let the user listen. Don't claim a mix sounds good — you can only measure it.
+See references/sound.md for effect count, hitting on the frame, ducking, mastering, and why music taste is the user's call.
 
 ## Output spec
 
-Match the source unless the user asked for something specific. Common targets: `1920×1080@24` cinematic, `1920×1080@30` screen content, `1080×1920@30` vertical social, `3840×2160@24` 4K cinema, `1080×1080@30` square. `render.py` defaults the scale to 1080p from any source; pass `--filter` or edit the extract command for other targets. Worth asking the user which delivery format matters.
+See references/output-spec.md for common delivery targets.
 
 ## EDL format
 
-```json
-{
-  "version": 1,
-  "sources": {"C0103": "/abs/path/C0103.MP4", "C0108": "/abs/path/C0108.MP4"},
-  "ranges": [
-    {"source": "C0103", "start": 2.42, "end": 6.85,
-     "beat": "HOOK", "quote": "...", "reason": "Cleanest delivery, stops before slip at 38.46."},
-    {"source": "C0108", "start": 14.30, "end": 28.90,
-     "beat": "SOLUTION", "quote": "...", "reason": "Only take without the false start."}
-  ],
-  "grade": "warm_cinematic",
-  "overlays": [
-    {"file": "edit/animations/slot_1/render.mp4", "start_in_output": 0.0, "duration": 5.0}
-  ],
-  "subtitles": "edit/master.srt",
-  "total_duration_s": 87.4
-}
-```
-
-`grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST.
+See references/edl-format.md for the full `edl.json` schema.
 
 ## Memory — `project.md`
 
@@ -323,20 +157,4 @@ On startup, read `project.md` if it exists and summarize the last session in one
 
 ## Anti-patterns
 
-Things that consistently fail regardless of style:
-
-- **Hierarchical pre-computed codec formats** with USABILITY / tone tags / shot layers. Over-engineering. Derive from the transcript at decision time.
-- **Hand-tuned moment-scoring functions.** The LLM picks better than any heuristic you'll write.
-- **Whisper SRT / phrase-level output.** Loses sub-second gap data. Always word-level verbatim.
-- **Running Whisper locally on CPU.** Slow and it normalizes fillers. Use hosted Scribe.
-- **Burning subtitles into base before compositing overlays.** Overlays hide them. (Hard Rule 1.)
-- **Single-pass filtergraph when you have overlays.** Double re-encodes. Use per-segment extract → concat.
-- **Linear animation easing.** Looks robotic. Always cubic.
-- **Unverified web fonts.** A failed load silently falls back to a system face. Assert the font loaded before rendering.
-- **Stock SFX on every transition.** Tie each effect to a visible event; cap the count.
-- **Hard audio cuts at segment boundaries.** Audible pops. (Hard Rule 3.)
-- **Typing text centered on the partial string.** Text slides left as it grows.
-- **Sequential sub-agents for multiple animations.** Always parallel.
-- **Editing before confirming the strategy.** Never.
-- **Re-transcribing cached sources.** Immutable outputs of immutable inputs.
-- **Assuming what kind of video it is.** Look first, ask second, edit last.
+See references/anti-patterns.md for things that consistently fail regardless of style.

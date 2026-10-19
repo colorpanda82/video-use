@@ -1,5 +1,28 @@
 # Mobjects Reference
 
+## Contents
+- Text
+- Shapes
+- Polygons and Arcs
+- Sectors and Annuli
+- Positioning
+- VGroup vs Group
+- Styling
+- Specialized Mobjects
+- Custom Mobjects
+- Matrix Mobjects
+- Constants
+- SVGMobject — Import SVG Files
+- ImageMobject — Display Images
+- Variable — Auto-Updating Display
+- BulletedList
+- DashedLine and Angle Markers
+- Boolean Operations (CSG)
+- LabeledArrow / LabeledLine
+- Text Color/Font/Style Per-Substring (t2c, t2f, t2s, t2w)
+- Backstroke for Readability Over Backgrounds
+- Complex Function Transforms
+
 Everything visible on screen is a Mobject. They have position, color, opacity, and can be animated.
 
 ## Text
