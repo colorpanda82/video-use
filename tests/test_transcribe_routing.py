@@ -32,7 +32,7 @@ class _Stubs:
         self.scribe_called = False
         self._orig = {}
 
-    def _fake_extract_audio(self, video, dest):
+    def _fake_extract_audio(self, video, dest, audio_track=0):
         Path(dest).write_bytes(b"\x00\x00")  # non-empty so .stat() works
 
     def _fake_call_scribe(self, audio, api_key, language=None, num_speakers=None):
@@ -41,8 +41,9 @@ class _Stubs:
             raise self.scribe_error
         return self.scribe_result
 
-    def _fake_whisper(self, video, edit_dir, *, model=None, language=None, verbose=True):
+    def _fake_whisper(self, video, edit_dir, *, model=None, language=None, verbose=True, audio_track=0):
         self.whisper_called = True
+        self.whisper_audio_track = audio_track
         out = Path(edit_dir) / "transcripts" / f"{Path(video).stem}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({"language_code": "en", "text": "via-whisper", "words": []}))
@@ -52,6 +53,11 @@ class _Stubs:
         self._orig["extract_audio"] = transcribe.extract_audio
         self._orig["call_scribe"] = transcribe.call_scribe
         self._orig["whisper"] = transcribe_whisper.transcribe_one_whisper
+        self._orig["count_audio_tracks"] = transcribe.count_audio_tracks
+        self._orig["peak_dbfs"] = transcribe.peak_dbfs
+        # The fake video and 2-byte wav are not real media: one track, audible peak.
+        transcribe.count_audio_tracks = lambda video: 1
+        transcribe.peak_dbfs = lambda wav: -3.0
         transcribe.extract_audio = self._fake_extract_audio
         transcribe.call_scribe = self._fake_call_scribe
         # transcribe_one does a lazy `from transcribe_whisper import ...`, so
@@ -63,6 +69,8 @@ class _Stubs:
         transcribe.extract_audio = self._orig["extract_audio"]
         transcribe.call_scribe = self._orig["call_scribe"]
         transcribe_whisper.transcribe_one_whisper = self._orig["whisper"]
+        transcribe.count_audio_tracks = self._orig["count_audio_tracks"]
+        transcribe.peak_dbfs = self._orig["peak_dbfs"]
 
 
 def _edit_dir():
@@ -104,6 +112,17 @@ def test_scribe_quota_429_falls_back_to_whisper():
     assert s.scribe_called is True
     assert s.whisper_called is True
     assert json.loads(out.read_text())["text"] == "via-whisper"
+
+
+def test_whisper_fallback_keeps_the_audio_track():
+    os.environ.pop("VIDEO_USE_TRANSCRIBER", None)
+    err = transcribe.ScribeHTTPError(429, "Scribe returned 429: quota")
+    with _Stubs(scribe_error=err) as s:
+        transcribe.transcribe_one(
+            Path("/nonexistent/clip.mp4"), _edit_dir(), api_key="real-key",
+            verbose=False, audio_track=1,
+        )
+    assert s.whisper_audio_track == 1
 
 
 def test_scribe_auth_401_and_payment_402_fall_back():
